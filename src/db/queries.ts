@@ -3512,6 +3512,28 @@ export class QueryBuilder {
     return out;
   }
 
+  /** Resolution edges originating in a language whose import scope may have changed. */
+  getResolutionEdgesBySourceLanguage(
+    language: Language
+  ): Array<Edge & { edgeId: number; sourceFilePath: string; sourceLanguage: Language }> {
+    const rows = this.db.prepare(`
+      SELECT e.*, src.file_path AS source_file_path, src.language AS source_language
+        FROM nodes src JOIN edges e ON e.source = src.id
+       WHERE src.language = ? AND e.kind IN ('calls', 'imports')
+         AND (e.provenance IS NULL OR e.provenance != 'heuristic')
+    `).all(language) as Array<EdgeRow & { source_file_path: string; source_language: Language }>;
+    return rows.map((row) => ({
+      ...rowToEdge(row), edgeId: row.id,
+      sourceFilePath: row.source_file_path, sourceLanguage: row.source_language,
+    }));
+  }
+
+  /** Retry failed bindings when language-specific lookup cannot use raw name tails. */
+  reopenFailedReferencesByLanguage(language: Language): void {
+    this.db.prepare("UPDATE unresolved_refs SET status = 'pending' WHERE language = ? AND status = 'failed'")
+      .run(language);
+  }
+
   /** Delete edges by primary key — the rebind pass's half of a re-resolution. */
   deleteEdgesByIds(edgeIds: number[]): number {
     if (edgeIds.length === 0) return 0;

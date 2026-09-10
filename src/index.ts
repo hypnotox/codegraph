@@ -952,6 +952,14 @@ export class CodeGraph {
           }
         }
 
+        // Robot binds normalized names through transitive Resource imports.
+        // Raw name deltas cannot detect either a newly satisfiable normalized
+        // call or a changed import scope. Reopen Robot bindings on Robot edits;
+        // extraction remains incremental and other languages are unaffected.
+        if (result.changedLanguages?.includes('robot')) {
+          this.orchestrator.resurrectLanguageResolutionEdges('robot', result.changedFilePaths ?? []);
+        }
+
         // Orphan sweep (#1187). A resolution pass that dies mid-run — the #850
         // daemon liveness watchdog's SIGKILL (#1122), Ctrl-C, a crash — leaves
         // the refs it never reached in unresolved_refs, and the git-scoped fast

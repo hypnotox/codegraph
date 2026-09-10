@@ -23,6 +23,7 @@ import { isVisibleAcrossFiles, matchReference, matchFunctionRef, matchDottedCall
 import { resolveViaImport, resolvePhpImportedStaticCall, resolveJvmImport, extractImportMappings, extractReExports, loadCppIncludeDirs, isPhpIncludePathRef, isCobolCopybookRef, isNixPathImportRef, isBoundToOutOfRepoImport, clearImportResolverMemos, resolveImportPath } from './import-resolver';
 import { ResolverPool, minRefsForPool } from './resolver-pool';
 import { resolveAliasBinding } from './alias-binding';
+import { resolveRobotReference } from './robot';
 import { detectFrameworks } from './frameworks';
 import { synthesizeCallbackEdges } from './callback-synthesizer';
 import { createYielder, type MaybeYield } from './cooperative-yield';
@@ -895,6 +896,10 @@ export class ReferenceResolver {
   }
 
   private resolveOneInner(ref: UnresolvedRef): ResolvedRef | null {
+    // Robot names ignore spaces/underscores and are scoped by resource imports.
+    // Never fall through to generic global/fuzzy matching on an unresolved call.
+    if (ref.language === 'robot') return resolveRobotReference(ref, this.context);
+
     // Skip built-in/external references
     if (this.isBuiltInOrExternal(ref)) {
       return null;

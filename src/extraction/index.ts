@@ -140,6 +140,8 @@ export interface SyncResult {
    * nothing downstream.
    */
   definitionDelta?: string[];
+  /** Languages added, modified or removed, including a removed file's old language. */
+  changedLanguages?: Language[];
 }
 
 /**
@@ -2887,9 +2889,24 @@ export class ExtractionOrchestrator {
    */
   resurrectStaleResolutionEdges(definitionDelta: string[], changedFilePaths: string[]): number {
     if (definitionDelta.length === 0) return 0;
-    const alreadyFresh = new Set(changedFilePaths);
-    const candidates = this.queries.getResolutionEdgesByTargetName(definitionDelta);
+    return this.resurrectResolutionEdges(
+      this.queries.getResolutionEdgesByTargetName(definitionDelta), changedFilePaths
+    );
+  }
 
+  /** Rebind language-scoped references without reparsing unchanged source files. */
+  resurrectLanguageResolutionEdges(language: Language, changedFilePaths: string[]): number {
+    this.queries.reopenFailedReferencesByLanguage(language);
+    return this.resurrectResolutionEdges(
+      this.queries.getResolutionEdgesBySourceLanguage(language), changedFilePaths
+    );
+  }
+
+  private resurrectResolutionEdges(
+    candidates: Array<Edge & { edgeId: number; sourceFilePath: string; sourceLanguage: Language }>,
+    changedFilePaths: string[]
+  ): number {
+    const alreadyFresh = new Set(changedFilePaths);
     const edgeIds: number[] = [];
     const refs: UnresolvedReference[] = [];
     for (const e of candidates) {
@@ -2946,6 +2963,7 @@ export class ExtractionOrchestrator {
     let filesRemoved = 0;
     let nodesUpdated = 0;
     const changedFilePaths: string[] = [];
+    const changedLanguages = new Set<Language>();
     // `file\0name` definition pairs for the files this sync touches, sampled
     // BEFORE their nodes are replaced/deleted. Compared against the post-store
     // pairs below to derive `definitionDelta` (CG-33).
@@ -3051,6 +3069,7 @@ export class ExtractionOrchestrator {
             this.queries.insertUnresolvedRefsBatch(resurrected);
           }
         }
+        changedLanguages.add(tracked.language);
         this.queries.deleteFile(tracked.path);
         filesRemoved++;
       }
@@ -3114,6 +3133,10 @@ export class ExtractionOrchestrator {
     // definition set is readable (CG-33).
     if (filesToIndex.length > 0) {
       for (const pair of this.queries.getNodeNamePairsByFiles(filesToIndex)) pairsBefore.add(pair);
+      for (const file of filesToIndex) {
+        const previous = trackedMap.get(file);
+        if (previous) changedLanguages.add(previous.language);
+      }
     }
 
     // Load only grammars needed for changed files
@@ -3135,6 +3158,8 @@ export class ExtractionOrchestrator {
 
       const result = await this.indexFile(filePath);
       nodesUpdated += result.nodes.length;
+      const indexed = this.queries.getFileByPath(filePath);
+      if (indexed) changedLanguages.add(indexed.language);
 
       const pause = backpressure?.();
       if (pause) await pause;
@@ -3168,6 +3193,7 @@ export class ExtractionOrchestrator {
       durationMs: Date.now() - startTime,
       changedFilePaths: changedFilePaths.length > 0 ? changedFilePaths : undefined,
       definitionDelta: definitionDelta.length > 0 ? definitionDelta : undefined,
+      changedLanguages: changedLanguages.size > 0 ? [...changedLanguages] : undefined,
     };
   }
 
