@@ -13,23 +13,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: npm ci
-      - name: Collect static-analysis reference sources and compiler
+      - run: npm ci && npm install --save yaml@^2.8.1 saxes@^6.0.0
+      - name: Collect released reference implementation
         run: |
-          mkdir -p /tmp/robot-reference
-          git clone --depth 1 https://github.com/robotframework/robotframework.git /tmp/robot-reference/robotframework
-          git clone --depth 1 https://github.com/robotcodedev/robotcode.git /tmp/robot-reference/robotcode
-          npm install --prefix /tmp/robot-reference/compiler tree-sitter-cli@0.25.10
-          git diff HEAD --binary > /tmp/robot-reference/worktree.patch
-          git rev-parse HEAD > /tmp/robot-reference/codegraph-head.txt
-      - name: Package development inputs
-        run: |
-          tar --exclude=.git -czf /tmp/codegraph-static-development.tar.gz .
-          tar --exclude=.git -czf /tmp/robot-reference.tar.gz -C /tmp robot-reference
+          python -m pip install --target /tmp/robot-stable robotframework==7.4.2
+          tar -czf /tmp/robot-static-inputs.tar.gz package.json package-lock.json node_modules/yaml node_modules/saxes node_modules/xmlchars -C /tmp robot-stable
       - uses: actions/upload-artifact@v4
         with:
-          name: robot-static-development
-          path: |
-            /tmp/codegraph-static-development.tar.gz
-            /tmp/robot-reference.tar.gz
+          name: robot-static-inputs
+          path: /tmp/robot-static-inputs.tar.gz
           retention-days: 2
