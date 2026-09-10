@@ -1,0 +1,35 @@
+name: Robot static resolution development
+on:
+  push:
+    branches: [feat/robot-framework]
+    paths: [.github/workflows/robot-static-development.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci
+      - name: Collect static-analysis reference sources and compiler
+        run: |
+          mkdir -p /tmp/robot-reference
+          git clone --depth 1 https://github.com/robotframework/robotframework.git /tmp/robot-reference/robotframework
+          git clone --depth 1 https://github.com/robotcodedev/robotcode.git /tmp/robot-reference/robotcode
+          npm install --prefix /tmp/robot-reference/compiler tree-sitter-cli@0.25.10
+          git diff HEAD --binary > /tmp/robot-reference/worktree.patch
+          git rev-parse HEAD > /tmp/robot-reference/codegraph-head.txt
+      - name: Package development inputs
+        run: |
+          tar --exclude=.git -czf /tmp/codegraph-static-development.tar.gz .
+          tar --exclude=.git -czf /tmp/robot-reference.tar.gz -C /tmp robot-reference
+      - uses: actions/upload-artifact@v4
+        with:
+          name: robot-static-development
+          path: |
+            /tmp/codegraph-static-development.tar.gz
+            /tmp/robot-reference.tar.gz
+          retention-days: 2
