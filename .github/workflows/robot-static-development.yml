@@ -13,13 +13,110 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: npm ci && npm install --save yaml@^2.8.1 saxes@^6.0.0
-      - name: Collect released reference implementation
+      - run: npm install --global tree-sitter-cli@0.25.10 && sudo apt-get update -qq && sudo apt-get install -y emscripten
+      - name: Build candidate grammar
+        working-directory: vendor/tree-sitter-robot
         run: |
-          python -m pip install --target /tmp/robot-stable robotframework==7.4.2
-          tar -czf /tmp/robot-static-inputs.tar.gz package.json package-lock.json node_modules/yaml node_modules/saxes node_modules/xmlchars -C /tmp robot-stable
+          cat > grammar.js <<'EOF'
+          // Robot's syntax is cell based. Keep tokenization in Tree-sitter; section,
+          // setting and statement interpretation belongs to CodeGraph's Robot model.
+          // This accepts both data formats without interpreting expressions inside cells.
+          module.exports = grammar({
+            name: 'robot',
+            externals: $ => [$.cell, $.separator, $._newline],
+            extras: $ => [],
+            rules: {
+              source_file: $ => repeat(choice($.row, $._newline)),
+              row: $ => seq(repeat1(choice($.cell, $.separator)), $._newline),
+            },
+          });
+          EOF
+          cat > src/scanner.c <<'EOF'
+          #include "tree_sitter/parser.h"
+          #include <stdbool.h>
+          #include <stdlib.h>
+          #include <wctype.h>
+          enum Token { CELL, SEPARATOR, NEWLINE };
+          typedef struct { bool start, pipe; } Scanner;
+          static bool eol(TSLexer *l) { return l->lookahead == '\n' || l->lookahead == '\r' || l->eof(l); }
+          static bool space(TSLexer *l) { return !eol(l) && iswspace(l->lookahead); }
+          static void advance(TSLexer *l) { l->advance(l, false); }
+          void *tree_sitter_robot_external_scanner_create(void) {
+            Scanner *s = calloc(1, sizeof(Scanner)); s->start = true; return s;
+          }
+          void tree_sitter_robot_external_scanner_destroy(void *p) { free(p); }
+          unsigned tree_sitter_robot_external_scanner_serialize(void *p, char *b) {
+            Scanner *s = p; b[0] = s->start; b[1] = s->pipe; return 2;
+          }
+          void tree_sitter_robot_external_scanner_deserialize(void *p, const char *b, unsigned n) {
+            Scanner *s = p; s->start = n ? b[0] : true; s->pipe = n > 1 ? b[1] : false;
+          }
+          bool tree_sitter_robot_external_scanner_scan(void *p, TSLexer *l, const bool *valid) {
+            Scanner *s = p;
+            if (l->eof(l)) return false;
+            if (eol(l)) {
+              if (!valid[NEWLINE]) return false;
+              if (l->lookahead == '\r') advance(l);
+              if (l->lookahead == '\n') advance(l);
+              l->mark_end(l); l->result_symbol = NEWLINE; s->start = true; s->pipe = false;
+              return true;
+            }
+            if (!valid[CELL] || !valid[SEPARATOR]) return false;
+            bool have = false;
+            if (s->start) {
+              s->start = false;
+              if (l->lookahead == '|') {
+                advance(l); l->mark_end(l);
+                if (space(l) || eol(l)) {
+                  s->pipe = true;
+                  while (space(l)) advance(l);
+                  l->mark_end(l); l->result_symbol = SEPARATOR; return true;
+                }
+                have = true;
+              }
+            }
+            if (s->pipe && !have && l->lookahead == '|') {
+              advance(l); l->mark_end(l);
+              if (space(l) || eol(l)) {
+                while (space(l)) advance(l);
+                l->mark_end(l); l->result_symbol = SEPARATOR; return true;
+              }
+              have = true;
+            }
+            while (!eol(l)) {
+              if (space(l)) {
+                bool tab = false; unsigned count = 0;
+                while (space(l)) { tab |= l->lookahead == '\t'; count++; advance(l); }
+                if (!s->pipe && (count >= 2 || tab)) {
+                  if (have) { l->result_symbol = CELL; return true; }
+                  l->mark_end(l); l->result_symbol = SEPARATOR; return true;
+                }
+                if (s->pipe && l->lookahead == '|') {
+                  advance(l);
+                  if (space(l) || eol(l)) {
+                    if (have) { l->result_symbol = CELL; return true; }
+                    while (space(l)) advance(l);
+                    l->mark_end(l); l->result_symbol = SEPARATOR; return true;
+                  }
+                }
+                if (eol(l)) {
+                  if (have) { l->result_symbol = CELL; return true; }
+                  l->mark_end(l); l->result_symbol = SEPARATOR; return true;
+                }
+                have = true; l->mark_end(l);
+              } else {
+                advance(l); have = true; l->mark_end(l);
+              }
+            }
+            if (!have) return false;
+            l->result_symbol = CELL; return true;
+          }
+          EOF
+          tree-sitter generate --abi 14
+          tree-sitter build --wasm
+          tar -czf /tmp/robot-table-grammar.tar.gz grammar.js src tree-sitter-robot.wasm
       - uses: actions/upload-artifact@v4
         with:
-          name: robot-static-inputs
-          path: /tmp/robot-static-inputs.tar.gz
+          name: robot-table-grammar
+          path: /tmp/robot-table-grammar.tar.gz
           retention-days: 2
