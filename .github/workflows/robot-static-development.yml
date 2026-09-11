@@ -14,13 +14,10 @@ jobs:
         with:
           node-version: '22'
       - run: npm install --global tree-sitter-cli@0.25.10 && sudo apt-get update -qq && sudo apt-get install -y emscripten
-      - name: Build candidate grammar
+      - name: Build Unicode cell grammar
         working-directory: vendor/tree-sitter-robot
         run: |
           cat > grammar.js <<'EOF'
-          // Robot's syntax is cell based. Keep tokenization in Tree-sitter; section,
-          // setting and statement interpretation belongs to CodeGraph's Robot model.
-          // This accepts both data formats without interpreting expressions inside cells.
           module.exports = grammar({
             name: 'robot',
             externals: $ => [$.cell, $.separator, $._newline],
@@ -35,11 +32,14 @@ jobs:
           #include "tree_sitter/parser.h"
           #include <stdbool.h>
           #include <stdlib.h>
-          #include <wctype.h>
           enum Token { CELL, SEPARATOR, NEWLINE };
           typedef struct { bool start, pipe; } Scanner;
           static bool eol(TSLexer *l) { return l->lookahead == '\n' || l->lookahead == '\r' || l->eof(l); }
-          static bool space(TSLexer *l) { return !eol(l) && iswspace(l->lookahead); }
+          static bool space(TSLexer *l) {
+            int32_t c = l->lookahead;
+            return !eol(l) && ((c >= 9 && c <= 13) || (c >= 28 && c <= 32) || c == 133 || c == 160 ||
+              c == 5760 || (c >= 8192 && c <= 8202) || c == 8232 || c == 8233 || c == 8239 || c == 8287 || c == 12288);
+          }
           static void advance(TSLexer *l) { l->advance(l, false); }
           void *tree_sitter_robot_external_scanner_create(void) {
             Scanner *s = calloc(1, sizeof(Scanner)); s->start = true; return s;
@@ -104,9 +104,7 @@ jobs:
                   l->mark_end(l); l->result_symbol = SEPARATOR; return true;
                 }
                 have = true; l->mark_end(l);
-              } else {
-                advance(l); have = true; l->mark_end(l);
-              }
+              } else { advance(l); have = true; l->mark_end(l); }
             }
             if (!have) return false;
             l->result_symbol = CELL; return true;
@@ -114,9 +112,9 @@ jobs:
           EOF
           tree-sitter generate --abi 14
           tree-sitter build --wasm
-          tar -czf /tmp/robot-table-grammar.tar.gz grammar.js src tree-sitter-robot.wasm
+          tar -czf /tmp/robot-unicode-grammar.tar.gz grammar.js src tree-sitter-robot.wasm
       - uses: actions/upload-artifact@v4
         with:
-          name: robot-table-grammar
-          path: /tmp/robot-table-grammar.tar.gz
+          name: robot-unicode-grammar
+          path: /tmp/robot-unicode-grammar.tar.gz
           retention-days: 2
