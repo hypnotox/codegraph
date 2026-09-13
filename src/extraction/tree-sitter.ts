@@ -30,6 +30,9 @@ import { AstroExtractor } from './astro-extractor';
 import { DfmExtractor } from './dfm-extractor';
 import { VueExtractor } from './vue-extractor';
 import { MyBatisExtractor } from './mybatis-extractor';
+import { extractRobotData } from './robot-data';
+import type { RobotDefaults } from './languages/robot';
+import { extractRobot } from './robot-extractor';
 import { CfmlExtractor } from './cfml-extractor';
 import { tryKernelExtract, takeDeferredPreParse } from './kernel';
 import {
@@ -7134,7 +7137,8 @@ export function extractFromSource(
   filePath: string,
   source: string,
   language?: Language,
-  frameworkNames?: string[]
+  frameworkNames?: string[],
+  robotDefaults?: RobotDefaults
 ): ExtractionResult {
   const detectedLanguage = language || detectLanguage(filePath, source);
   const fileExtension = path.extname(filePath).toLowerCase();
@@ -7142,7 +7146,12 @@ export function extractFromSource(
   let result: ExtractionResult;
 
   // Use custom extractor for Svelte
-  if (detectedLanguage === 'svelte') {
+  if ((detectedLanguage === 'yaml' || detectedLanguage === 'json') && /\.(json|ya?ml)$/i.test(filePath) ||
+      detectedLanguage === 'xml' && /<keywordspec\b/.test(source)) {
+    result = extractRobotData(filePath, source, detectedLanguage);
+  } else if (detectedLanguage === 'robot') {
+    result = extractRobot(filePath, source, robotDefaults);
+  } else if (detectedLanguage === 'svelte') {
     const extractor = new SvelteExtractor(filePath, source);
     result = extractor.extract();
   } else if (detectedLanguage === 'vue') {

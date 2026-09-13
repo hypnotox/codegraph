@@ -120,6 +120,7 @@ export const LANGUAGES = [
   'terraform',
   'robot',
   'unknown',
+  'json',
 ] as const;
 
 export type Language = (typeof LANGUAGES)[number];

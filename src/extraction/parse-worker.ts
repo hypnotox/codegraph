@@ -13,6 +13,7 @@ try {
   (require('node:module') as { enableCompileCache?: () => void }).enableCompileCache?.();
 } catch { /* cache is best-effort */ }
 
+import type { RobotDefaults } from './languages/robot';
 import { parentPort } from 'worker_threads';
 import { extractFromSource } from './tree-sitter';
 import { detectLanguage, loadGrammarsForLanguages, resetParser } from './grammars';
@@ -65,7 +66,7 @@ import type { Language, ExtractionResult } from '../types';
 const PARSER_RESET_INTERVAL = 5000;
 const parseCounts = new Map<Language, number>();
 
-parentPort!.on('message', async (msg: { type: string; id?: number; filePath?: string; content?: string; languages?: Language[]; frameworkNames?: string[]; language?: Language; grammarBuffers?: Record<string, Uint8Array> }) => {
+parentPort!.on('message', async (msg: { type: string; id?: number; filePath?: string; content?: string; languages?: Language[]; frameworkNames?: string[]; robotDefaults?: RobotDefaults; language?: Language; grammarBuffers?: Record<string, Uint8Array> }) => {
   if (msg.type === 'load-grammars') {
     // Grammar WASM bytes pre-read by the main thread (when provided) make this
     // a memory load instead of a per-spawn disk read — see issue #1231.
@@ -111,7 +112,7 @@ parentPort!.on('message', async (msg: { type: string; id?: number; filePath?: st
           };
         }
       }
-      result ??= extractFromSource(filePath!, content!, language, frameworkNames);
+      result ??= extractFromSource(filePath!, content!, language, frameworkNames, msg.robotDefaults);
 
       // Periodic parser reset to reclaim WASM heap memory
       const count = (parseCounts.get(language) ?? 0) + 1;

@@ -20,6 +20,7 @@ try {
   (require('node:module') as { enableCompileCache?: () => void }).enableCompileCache?.();
 } catch { /* cache is best-effort */ }
 
+import { loadGrammarsForLanguages } from '../extraction/grammars';
 import { parentPort, threadId } from 'worker_threads';
 import { createDatabase, SqliteDatabase } from '../db/sqlite-adapter';
 import { QueryBuilder } from '../db/queries';
@@ -46,7 +47,7 @@ type InMessage =
 
 let dbPath: string | null = null;
 
-port.on('message', (msg: InMessage) => {
+port.on('message', async (msg: InMessage) => {
   try {
     switch (msg.type) {
       case 'open': {
@@ -60,6 +61,7 @@ port.on('message', (msg: InMessage) => {
         queries = new QueryBuilder(db);
         resolver = new ReferenceResolver(msg.projectRoot, queries);
         resolver.initialize();
+        if (queries.getAllFiles().some(file => file.language === 'robot')) await loadGrammarsForLanguages(['python']);
         if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[pool-timing] worker open: db=${tDb - tOpen}ms init=${Date.now() - tDb}ms`);
         port.postMessage({ type: 'ready' });
         break;

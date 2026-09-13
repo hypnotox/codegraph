@@ -4,6 +4,8 @@
  * Coordinates file scanning, parsing, and database storage.
  */
 
+import { robotLocale } from './robot-locale';
+import { robotRows, type RobotDefaults } from './languages/robot';
 import * as fs from 'fs';
 import * as fsp from 'fs/promises';
 import * as path from 'path';
@@ -1649,6 +1651,7 @@ function resurrectRefFromDroppedEdge(
     column: e.column ?? 0,
     filePath: e.sourceFilePath,
     language: e.sourceLanguage,
+    candidates: Array.isArray(e.metadata?.refCandidates) ? e.metadata.refCandidates as string[] : undefined,
   };
 }
 
@@ -1783,6 +1786,34 @@ export class ExtractionOrchestrator {
     const context = this.buildDetectionContext(fileList);
     this.detectedFrameworkNames = detectFrameworks(context).map((r) => r.name);
     return this.detectedFrameworkNames;
+  }
+
+  /** Only test defaults inherit from initialization files; resource imports do not. */
+  private robotDefaults(file: string): RobotDefaults | undefined {
+    if (!/\.robot$/i.test(file)) return undefined;
+    const directories: string[] = [];
+    for (let dir = path.dirname(file); ; dir = path.dirname(dir)) {
+      directories.unshift(dir);
+      if (dir === '.' || dir === path.dirname(dir)) break;
+    }
+    const defaults: RobotDefaults = {};
+    for (const dir of directories) {
+      const init = path.join(dir, '__init__.robot');
+      if (init === file) continue;
+      let source: string;
+      try { source = fs.readFileSync(path.join(this.rootDir, init), 'utf8'); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error; }
+      let settings = false;
+      const locale = robotLocale(source);
+      for (const row of robotRows(source)) {
+        const raw = row.cells[0]!.text;
+        const name = locale.setting(raw);
+        if (raw.startsWith('***')) { settings = locale.header(raw.replace(/^\*+|\*+$/g, '').trim()) === 'settings'; continue; }
+        const match = settings && name.match(/^(?:test|task)(setup|teardown|template)$/);
+        if (match) defaults[match[1]!] = row.cells.slice(1).map(c => c.text);
+      }
+    }
+    return defaults;
   }
 
   /**
@@ -1973,8 +2004,9 @@ export class ExtractionOrchestrator {
      */
     const parseFile = (filePath: string, content: string): Promise<ExtractionResult> => {
       const language = detectLanguage(filePath, content, overrides);
-      if (!pool) return Promise.resolve(extractFromSource(filePath, content, language, frameworkNames));
-      return pool.requestParse({ filePath, content, language, frameworkNames });
+      const robotDefaults = this.robotDefaults(filePath);
+      if (!pool) return Promise.resolve(extractFromSource(filePath, content, language, frameworkNames, robotDefaults));
+      return pool.requestParse({ filePath, content, language, frameworkNames, robotDefaults });
     };
 
     // --- Bounded rolling-window dispatch, ordered commit ---
@@ -2562,7 +2594,7 @@ export class ExtractionOrchestrator {
     // otherwise detect on the spot so single-file re-index paths still emit
     // route nodes / middleware / etc.
     const frameworkNames = this.ensureDetectedFrameworks();
-    const result = extractFromSource(relativePath, content, language, frameworkNames);
+    const result = extractFromSource(relativePath, content, language, frameworkNames, this.robotDefaults(relativePath));
 
     // Store in database
     await this.storeExtractionResult(relativePath, content, language, stats, result, createYielder());
@@ -2635,7 +2667,9 @@ export class ExtractionOrchestrator {
       const existingIsMarker =
         existingFile.nodeCount === 0 && (existingFile.errors?.length ?? 0) > 0;
       const incomingHasContent = result.nodes.length > 0;
-      if (!existingIsMarker || !incomingHasContent) {
+      const inheritedChanged = language === 'robot' && JSON.stringify(result.nodes.find(n => n.kind === 'file')?.decorators) !==
+        JSON.stringify(this.queries.getNodesByFile(filePath).find(n => n.kind === 'file')?.decorators);
+      if ((!existingIsMarker || !incomingHasContent) && !inheritedChanged) {
         return; // No changes
       }
     }
@@ -3124,6 +3158,17 @@ export class ExtractionOrchestrator {
         filesToIndex.push(filePath);
         changedFilePaths.push(filePath);
         filesModified++;
+      }
+    }
+
+    // Parent test defaults change how child rows parse (template data vs calls).
+    // Re-extract only affected suites, including on init-file deletion.
+    const initDirs = [...changedFilePaths, ...trackedFiles.filter(f => path.basename(f.path).toLowerCase() === '__init__.robot' && !fs.existsSync(path.join(this.rootDir, f.path))).map(f => f.path)]
+      .filter(f => path.basename(f).toLowerCase() === '__init__.robot').map(f => path.dirname(f));
+    if (initDirs.length) for (const { path: file } of this.queries.getAllFiles()) {
+      if (!/\.robot$/i.test(file) || filesToIndex.includes(file) || !fs.existsSync(path.join(this.rootDir, file))) continue;
+      if (initDirs.some(dir => dir === '.' || file.startsWith(dir + '/'))) {
+        filesToIndex.push(file); changedFilePaths.push(file); filesModified++;
       }
     }
 

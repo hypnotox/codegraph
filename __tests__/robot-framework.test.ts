@@ -94,7 +94,7 @@ describe('Robot Framework indexing and resolution', () => {
 
   function edges(kind = 'calls'): { source: string; sourceFile: string; target: string; targetFile: string }[] {
     return (graph as any).db.db.prepare(`SELECT s.name AS source, s.file_path AS sourceFile, t.name AS target, t.file_path AS targetFile
-      FROM edges e JOIN nodes s ON s.id=e.source JOIN nodes t ON t.id=e.target WHERE e.kind=?`).all(kind);
+      FROM edges e JOIN nodes s ON s.id=e.source JOIN nodes t ON t.id=e.target WHERE e.kind=? ORDER BY e.line, e.id`).all(kind);
   }
 
   it('indexes resources and resolves local and cross-file calls with Robot name normalization', async () => {
@@ -129,7 +129,7 @@ describe('Robot Framework indexing and resolution', () => {
     ]);
   });
 
-  it('does not guess an unimported, ambiguous, dynamic or Python-library target', async () => {
+  it('resolves a static Python library without guessing unrelated or dynamic targets', async () => {
     await index({
       'suite.robot': `*** Settings ***\nResource    a.resource\nResource    b.resource\nLibrary    library.py\n\n*** Test Cases ***\nA Test\n    Ambiguous\n    Unimported\n    Python Call\n    \${dynamic}\n`,
       'a.resource': keywords('Ambiguous'),
@@ -137,8 +137,8 @@ describe('Robot Framework indexing and resolution', () => {
       'unrelated.resource': keywords('Unimported', 'Python Call'),
       'library.py': 'def python_call():\n    pass\n',
     });
-    expect(edges()).toEqual([]);
-    expect(edges('imports')).toHaveLength(2);
+    expect(edges()).toEqual([expect.objectContaining({ target: 'python_call', targetFile: 'library.py' })]);
+    expect(edges('imports')).toHaveLength(3);
   });
 
   it('uses explicit resource qualification to disambiguate otherwise equal keywords', async () => {
@@ -150,11 +150,11 @@ describe('Robot Framework indexing and resolution', () => {
     expect(edges()).toEqual([{ source: 'A Test', sourceFile: 'suite.robot', target: 'Do Work', targetFile: 'a.resource' }]);
   });
 
-  it('resolves BDD prefixes but prefers a keyword whose complete name matches', async () => {
+  it('resolves BDD prefixes before full names, following Robot Framework', async () => {
     await index({
       'suite.robot': `*** Test Cases ***\nA Test\n    Given Ready\n    When Ready\n\n${keywords('Given Ready', 'Ready')}`,
     });
-    expect(edges().filter((e) => e.source === 'A Test').map((e) => e.target).sort()).toEqual(['Given Ready', 'Ready']);
+    expect(edges().filter((e) => e.source === 'A Test').map((e) => e.target).sort()).toEqual(['Ready', 'Ready']);
   });
 
   it('does not loop or duplicate keyword candidates when resource imports form a cycle', async () => {
@@ -231,4 +231,202 @@ describe('Robot Framework indexing and resolution', () => {
     await graph!.sync();
     expect(edges().map((e) => e.target)).toEqual(['After']);
   });
+  it('resolves embedded arguments and regex constraints, preferring exact and more specific matches', async () => {
+    await index({ 'suite.robot': `*** Test Cases ***\nExample\n    User Alice logs in\n    Count 42\n    Count nope\n    User Bob logs in\n\n${keywords('User ${name} logs in', 'User Bob logs in', 'Count ${number:\\d+}')} ` });
+    expect(edges().filter(e => e.source === 'Example').map(e => e.target)).toEqual([
+      'User ${name} logs in', 'Count ${number:\\d+}', 'User Bob logs in',
+    ]);
+  });
+
+  it('keeps ambiguous embedded matches unresolved', async () => {
+    await index({ 'suite.robot': `*** Test Cases ***\nExample\n    Do a thing\n\n${keywords('Do ${value}', '${action} a thing')}` });
+    expect(edges()).toEqual([]);
+  });
+
+  it('resolves literal suite variables, nested names and collection lookups in imports and calls', async () => {
+    await index({
+      'suite.robot': `*** Settings ***\nResource    \${FOLDER}/shared.resource\n*** Variables ***\n\${FOLDER}    resources\n\${NAME}    Work\n\${SELECT}    NAME\n@{NAMES}    Work    Other\n&{WORDS}    action=Work\n*** Test Cases ***\nExample\n    \${NAME}\n    \${\${SELECT}}\n    \${NAMES}[0]\n    \${WORDS.action}\n`,
+      'resources/shared.resource': keywords('Work'),
+    });
+    expect(edges().filter(e => e.source === 'Example')).toHaveLength(4);
+    expect(edges('references').some(e => e.target === '${NAME}')).toBe(true);
+  });
+
+  it('binds arguments and assignments without treating their values as known at runtime', async () => {
+    await index({ 'suite.robot': `*** Variables ***\n\${TARGET}    Work\n*** Keywords ***\nCaller\n    [Arguments]    \${TARGET}=Work\n    \${TARGET}\nOther Caller\n    \${TARGET}=    Compute\n    \${TARGET}\n${keywords('Work', 'Compute').replace('*** Keywords ***\n', '')}` });
+    expect(edges().filter(e => e.source === 'Caller')).toEqual([]);
+    expect(edges().filter(e => e.source === 'Other Caller').map(e => e.target)).toEqual(['Compute']);
+    expect(edges('references').filter(e => e.source === 'Caller').map(e => e.target)).toEqual(['${TARGET}']);
+  });
+
+  it('resolves straight-line VAR values but does not assert branch-dependent values', async () => {
+    await index({ 'suite.robot': `*** Test Cases ***\nExample\n    VAR    \${target}    Work\n    \${target}\n    IF    \${condition}\n        VAR    \${target}    Other\n    END\n    \${target}\n\n${keywords('Work', 'Other')}` });
+    expect(edges().filter(e => e.source === 'Example').map(e => e.target)).toEqual(['Work']);
+  });
+
+  it('handles pipe syntax, escaped pipes, comments and continuation cells', async () => {
+    await index({ 'suite.robot': '| *** Settings *** |\n| Resource | shared.resource |\n| *** Test Cases *** |\n| Example |\n| | Work | first |\n| | ... | second |\n| | Escaped \\| Pipe | # comment |\n', 'shared.resource': keywords('Work', 'Escaped \\| Pipe') });
+    expect(edges().filter(e => e.source === 'Example').map(e => e.target)).toEqual(['Work', 'Escaped \\| Pipe']);
+  });
+
+  it('resolves Python aliases, decorated keyword names, automatic exposure and inherited methods', async () => {
+    await index({
+      'suite.robot': `*** Settings ***\nLibrary    libs.Actions    AS    API\n*** Test Cases ***\nExample\n    API.Custom Name\n    API.Inherited\n    API.Hidden\n    API.Undecorated\n`,
+      'libs.py': `from robot.api.deco import keyword as kw, library\nclass Base:\n    def inherited(self):\n        pass\n@library\nclass Actions(Base):\n    @kw(name="Custom Name")\n    def custom(self):\n        pass\n    def undecorated(self):\n        pass\n    def _hidden(self):\n        pass\n`,
+    });
+    expect(edges().filter(e => e.source === 'Example').map(e => e.target)).toEqual(['custom', 'inherited']);
+  });
+
+  it('honors not_keyword and does not execute dynamic libraries', async () => {
+    await index({
+      'suite.robot': `*** Settings ***\nLibrary    ordinary.py\nLibrary    Dynamic.py\n*** Test Cases ***\nExample\n    Public\n    Hidden\n    Dynamic.Public\n`,
+      'ordinary.py': `from robot.api.deco import not_keyword\ndef public():\n    pass\n@not_keyword\ndef hidden():\n    pass\n`,
+      'Dynamic.py': `class Dynamic:\n    def get_keyword_names(self):\n        return ['public']\n    def public(self):\n        pass\n`,
+    });
+    expect(edges().filter(e => e.source === 'Example').map(e => e.target)).toEqual(['public']);
+  });
+
+  it('follows BuiltIn nested calls and every conditional arm without evaluating conditions', async () => {
+    await index({ 'suite.robot': `*** Test Cases ***\nExample\n    Run Keyword    Work\n    Run Keywords    Work    AND    Other\n    Run Keyword If    \${condition}    Work    ELSE IF    \${other}    Other    ELSE    Last\n    Wait Until Keyword Succeeds    2x    1s    Run Keyword    Last\n\n${keywords('Work', 'Other', 'Last')}` });
+    expect(edges().filter(e => e.source === 'Example').map(e => e.target)).toEqual(['Work', 'Work', 'Other', 'Work', 'Other', 'Last', 'Last']);
+  });
+
+  it('does not treat a shadowed Run Keyword as BuiltIn dispatch', async () => {
+    await index({ 'suite.robot': `*** Test Cases ***\nExample\n    Run Keyword    Work\n\n${keywords('Run Keyword', 'Work')}` });
+    expect(edges().filter(e => e.source === 'Example').map(e => e.target)).toEqual(['Run Keyword']);
+  });
+
+  it('loads Python and JSON static variables for transitive resource lookup', async () => {
+    await index({
+      'suite.robot': `*** Settings ***\nVariables    values.py\nVariables    names.json\nResource    \${DIRECTORY}/\${FILE}\n*** Test Cases ***\nExample\n    \${KEYWORD}\n`,
+      'values.py': `DIRECTORY = 'resources'\nKEYWORD = 'Work'\nUNKNOWN = compute()\n`,
+      'names.json': '{"FILE": "shared.resource"}',
+      'resources/shared.resource': keywords('Work'),
+    });
+    expect(edges().filter(e => e.source === 'Example').map(e => e.target)).toEqual(['Work']);
+    expect(edges('imports')).toHaveLength(3);
+  });
+
+  it('loads static YAML literals and reports unsupported constructs', async () => {
+    await index({ 'suite.robot': `*** Settings ***\nVariables    values.yaml\n*** Test Cases ***\nExample\n    \${KEYWORD}\n\n${keywords('Work')}`, 'values.yaml': 'KEYWORD: Work\nNESTED:\n  key: value\n' });
+    expect(edges().filter(e => e.source === 'Example').map(e => e.target)).toEqual(['Work']);
+  });
+
+  it('resolves pre-generated Libdoc XML and JSON without importing the library', async () => {
+    await index({
+      'suite.robot': `*** Settings ***\nLibrary    Remote.libspec    WITH NAME    Remote\nLibrary    More.json    AS    More\n*** Test Cases ***\nExample\n    Remote.Do Work\n    More.Other Work\n`,
+      'Remote.libspec': '<keywordspec name="Remote"><kw name="Do Work"><doc>Does work.</doc></kw></keywordspec>',
+      'More.json': '{"name":"More", "type":"LIBRARY", "keywords":[{"name":"Other Work", "doc":"More work."}]}',
+    });
+    expect(edges().filter(e => e.source === 'Example').map(e => e.target)).toEqual(['Do Work', 'Other Work']);
+  });
+
+  it('rebinds unchanged Robot callers after Python decorator and JSON variable edits', async () => {
+    await index({
+      'suite.robot': `*** Settings ***\nLibrary    lib.py\nVariables    vars.json\n*** Test Cases ***\nExample\n    Run Keyword    \${TARGET}\n`,
+      'lib.py': 'def work():\n    pass\n', 'vars.json': '{"TARGET":"Work"}',
+    });
+    expect(edges().filter(e => e.source === 'Example').map(e => e.target)).toEqual(['work']);
+    write('lib.py', 'from robot.api.deco import keyword\n@keyword("Other")\ndef work():\n    pass\n');
+    await graph!.sync();
+    expect(edges().filter(e => e.source === 'Example')).toEqual([]);
+    write('vars.json', '{"TARGET":"Other"}');
+    await graph!.sync();
+    expect(edges().filter(e => e.source === 'Example').map(e => e.target)).toEqual(['work']);
+  });
+
+  it('resolves imported base classes and module keyword reexports with __all__', async () => {
+    await index({
+      'suite.robot': `*** Settings ***\nLibrary    child.Child\nLibrary    facade.py\n*** Test Cases ***\nExample\n    child.Child.Base Work\n    Renamed Work\n    Excluded\n`,
+      'base.py': 'class Base:\n    def base_work(self):\n        pass\n',
+      'child.py': 'from base import Base\nclass Child(Base):\n    pass\n',
+      'implementation.py': 'def work():\n    pass\n',
+      'facade.py': 'from implementation import work as renamed_work\n__all__ = ["renamed_work"]\ndef excluded():\n    pass\n',
+    });
+    expect(edges().filter(e => e.source === 'Example').map(e => e.target)).toEqual(['base_work', 'work']);
+  });
+
+  it('finds an unambiguous checked-in Libdoc by library name', async () => {
+    await index({ 'suite.robot': `*** Settings ***\nLibrary    Remote\n*** Test Cases ***\nExample\n    Remote.Remote Work\n`,
+      'specs/Remote.libspec': '<keywordspec name="Remote"><kw name="Remote Work"><doc>Remote.</doc></kw></keywordspec>' });
+    expect(edges().filter(e => e.source === 'Example').map(e => e.target)).toEqual(['Remote Work']);
+  });
+
+  it('keeps CURDIR tied to the resource that declares a variable', async () => {
+    await index({ 'suite.robot': `*** Settings ***\nResource    resources/vars.resource\nResource    \${MORE}\n*** Test Cases ***\nExample\n    Work\n`,
+      'resources/vars.resource': '*** Variables ***\n${MORE}    ${CURDIR}/work.resource\n',
+      'resources/work.resource': keywords('Work') });
+    expect(edges().filter(e => e.source === 'Example').map(e => e.target)).toEqual(['Work']);
+  });
+
+  it('keeps resource and variable cycles unresolved without executing Python providers', async () => {
+    await index({ 'suite.robot': `*** Settings ***\nVariables    vars.py\nResource    \${A}\n*** Variables ***\n\${A}    \${B}\n\${B}    \${A}\n*** Test Cases ***\nExample\n    \${TARGET}\n\n${keywords('Work')}`,
+      'vars.py': 'TARGET = "Work"\ndef get_variables():\n    raise RuntimeError("must never execute")\n' });
+    expect(edges().filter(e => e.source === 'Example')).toEqual([]);
+  });
+
+  it('refreshes bindings on reopen and converges to a fresh index after data edits', async () => {
+    const files = { 'suite.robot': `*** Settings ***\nVariables    vars.json\n*** Test Cases ***\nExample\n    Run Keywords    \${TARGET}    AND    Last\n\n${keywords('Work', 'Other', 'Last')}`, 'vars.json': '{"TARGET":"Work"}' };
+    await index(files);
+    graph!.destroy(); graph = await CodeGraph.open(dir, { silent: true });
+    write('vars.json', '{"TARGET":"Other"}');
+    await graph!.sync({ paths: ['vars.json'] });
+    const synced = edges().filter(e => e.source === 'Example');
+    expect(synced.map(e => e.target)).toEqual(['Other', 'Last']);
+    graph!.destroy(); graph = undefined;
+    fs.rmSync(path.join(dir, '.codegraph'), { recursive: true, force: true });
+    graph = await CodeGraph.init(dir, { silent: true }); await graph.indexAll();
+    expect(edges().filter(e => e.source === 'Example')).toEqual(synced);
+  });
+
+  it('inherits test defaults and reparses children after init edits and deletion', async () => {
+    await index({
+      '__init__.robot': '*** Settings ***\nTest Setup    Prepare\nTest Template    Work\n',
+      'tests/suite.robot': `*** Test Cases ***\nExample\n    data value\nExplicit\n    [Setup]    NONE\n    [Template]    NONE\n    Other\n\n${keywords('Prepare', 'Work', 'Other', 'data value')}`,
+    });
+    expect(edges().filter(e => e.source === 'Example').map(e => e.target)).toEqual(['Prepare', 'Work']);
+    expect(edges().filter(e => e.source === 'Explicit').map(e => e.target)).toEqual(['Other']);
+    write('__init__.robot', '*** Settings ***\nTest Template    Other\n');
+    await graph!.sync({ paths: ['__init__.robot'] });
+    expect(edges().filter(e => e.source === 'Example').map(e => e.target)).toEqual(['Other']);
+    fs.unlinkSync(path.join(dir, '__init__.robot'));
+    await graph!.sync({ paths: ['__init__.robot'] });
+    expect(edges().filter(e => e.source === 'Example').map(e => e.target)).toEqual(['data value']);
+  });
+
+  it('binds embedded templates without treating data rows as calls', async () => {
+    await index({ 'suite.robot': `*** Settings ***\nTest Template    User \${name} logs in\n*** Test Cases ***\nExample\n    Alice\n    Bob\n\n${keywords('User ${name} logs in', 'Alice', 'Bob')}` });
+    expect(edges().filter(e => e.source === 'Example').map(e => e.target)).toEqual(['User ${name} logs in']);
+  });
+
+  it('resolves source-declared localized headers, settings and BDD prefixes', async () => {
+    await index({ 'suite.robot': 'Language: de\n*** Einstellungen ***\nRessource    shared.resource\n*** Testfälle ***\nBeispiel\n    Angenommen Bereit\n', 'shared.resource': keywords('Bereit') });
+    expect(edges().filter(e => e.source === 'Beispiel').map(e => e.target)).toEqual(['Bereit']);
+  });
+
+  it('keeps self-referencing list variables unknown', async () => {
+    await index({ 'suite.robot': `*** Variables ***\n@{CYCLE}    \${CYCLE}\n*** Test Cases ***\nExample\n    \${CYCLE}[0]\n` });
+    expect(edges()).toEqual([]);
+  });
+
+  it('respects import order for variables from nested resources and data files', async () => {
+    await index({ 'suite.robot': `*** Settings ***\nResource    first.resource\nVariables    later.json\n*** Test Cases ***\nExample\n    \${TARGET}\n\n${keywords('First', 'Later')}`,
+      'first.resource': '*** Settings ***\nVariables    first.json\n',
+      'first.json': '{"TARGET":"First"}', 'later.json': '{"TARGET":"Later"}' });
+    expect(edges().filter(e => e.source === 'Example').map(e => e.target)).toEqual(['First']);
+  });
+
+  it('supports BuiltIn aliases and keywords decorated only with tags', async () => {
+    await index({ 'suite.robot': '*** Settings ***\nLibrary    BuiltIn    AS    BI\nLibrary    lib.py\n*** Test Cases ***\nExample\n    BI.Run Keyword    Work\n',
+      'lib.py': 'from robot.api.deco import keyword\n@keyword(tags=["example"])\ndef work():\n    pass\n' });
+    expect(edges().filter(e => e.source === 'Example').map(e => e.target)).toEqual(['work']);
+  });
+
+  it('uses a checked-in spec for an otherwise dynamic local library', async () => {
+    await index({ 'suite.robot': '*** Settings ***\nLibrary    Dynamic.py\n*** Test Cases ***\nExample\n    Dynamic.Work\n',
+      'Dynamic.py': 'class Dynamic:\n    def get_keyword_names(self):\n        raise RuntimeError("must not execute")\n',
+      'specs/Dynamic.libspec': '<keywordspec name="Dynamic"><kw name="Work"><doc>Known from Libdoc.</doc></kw></keywordspec>' });
+    expect(edges().filter(e => e.source === 'Example')).toEqual([expect.objectContaining({ target: 'Work', targetFile: 'specs/Dynamic.libspec' })]);
+  });
+
 });

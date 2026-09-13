@@ -27,6 +27,7 @@
  * the default is capped and the env var lets constrained machines dial it down.
  */
 
+import type { RobotDefaults } from './languages/robot';
 import { Worker } from 'worker_threads';
 import type { Language, ExtractionResult } from '../types';
 
@@ -51,6 +52,7 @@ export interface ParseTask {
   content: string;
   language: Language;
   frameworkNames?: string[];
+  robotDefaults?: RobotDefaults;
 }
 
 /** Default upper bound on the pool size derived from the core count. */
@@ -373,6 +375,7 @@ export class ParseWorkerPool {
       filePath: job.task.filePath,
       content: job.task.content,
       frameworkNames: job.task.frameworkNames,
+      robotDefaults: job.task.robotDefaults,
       language: job.task.language,
     });
   }

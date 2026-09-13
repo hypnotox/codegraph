@@ -223,9 +223,13 @@ class ENGINE_API UNetConnectionRepControl : public UObject
     expect(result.nodes.find((n) => n.name === 'Base')?.kind).toBe('struct');
   });
 
+  it('recognizes JSON static data files', () => {
+    expect(detectLanguage('data.json')).toBe('json');
+  });
+
   it('should return unknown for unsupported extensions', () => {
     expect(detectLanguage('styles.css')).toBe('unknown');
-    expect(detectLanguage('data.json')).toBe('unknown');
+    expect(detectLanguage('data.txt')).toBe('unknown');
   });
 });
 

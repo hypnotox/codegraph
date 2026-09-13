@@ -23,7 +23,7 @@ import { isVisibleAcrossFiles, matchReference, matchFunctionRef, matchDottedCall
 import { resolveViaImport, resolvePhpImportedStaticCall, resolveJvmImport, extractImportMappings, extractReExports, loadCppIncludeDirs, isPhpIncludePathRef, isCobolCopybookRef, isNixPathImportRef, isBoundToOutOfRepoImport, clearImportResolverMemos, resolveImportPath } from './import-resolver';
 import { ResolverPool, minRefsForPool } from './resolver-pool';
 import { resolveAliasBinding } from './alias-binding';
-import { resolveRobotReference } from './robot';
+import { RobotResolver } from './robot';
 import { detectFrameworks } from './frameworks';
 import { synthesizeCallbackEdges } from './callback-synthesizer';
 import { createYielder, type MaybeYield } from './cooperative-yield';
@@ -232,6 +232,7 @@ export class ReferenceResolver {
   // codebases with 20k+ files (see issue: unbounded cache growth).
   private nodeCache: LRUCache<string, Node[]>; // per-file node cache
   private fileCache: LRUCache<string, string | null>; // per-file content cache
+  private robotResolver?: RobotResolver;
   private importMappingCache: LRUCache<string, ImportMapping[]>;
   private reExportCache: LRUCache<string, ReExport[]>;
   private nameCache: LRUCache<string, Node[]>; // name → nodes cache
@@ -392,6 +393,7 @@ export class ReferenceResolver {
    * Clear internal caches
    */
   clearCaches(): void {
+    this.robotResolver?.clear();
     this.nodeCache.clear();
     this.fileCache.clear();
     this.importMappingCache.clear();
@@ -732,6 +734,7 @@ export class ReferenceResolver {
       filePath: ref.filePath || this.getFilePathFromNodeId(ref.fromNodeId),
       language: ref.language || this.getLanguageFromNodeId(ref.fromNodeId),
       rowId: ref.rowId,
+      candidates: ref.candidates,
     }));
 
     const total = refs.length;
@@ -898,7 +901,7 @@ export class ReferenceResolver {
   private resolveOneInner(ref: UnresolvedRef): ResolvedRef | null {
     // Robot names ignore spaces/underscores and are scoped by resource imports.
     // Never fall through to generic global/fuzzy matching on an unresolved call.
-    if (ref.language === 'robot') return resolveRobotReference(ref, this.context);
+    if (ref.language === 'robot') return (this.robotResolver ??= new RobotResolver(this.context)).resolve(ref);
 
     // Skip built-in/external references
     if (this.isBuiltInOrExternal(ref)) {
@@ -1197,6 +1200,7 @@ export class ReferenceResolver {
           // wrong rebind; edges without refName (pre-#1240, synthesized) are
           // deliberately NOT resurrected for the same reason.
           refName: ref.original.referenceName,
+          ...(ref.original.candidates ? { refCandidates: ref.original.candidates } : {}),
           ...(ref.original.referenceKind !== kind ? { refKind: ref.original.referenceKind } : {}),
           // Uniform marker for function-as-value edges (#756), regardless of
           // which strategy resolved them (import vs matchFunctionRef) — lets
@@ -1479,6 +1483,7 @@ export class ReferenceResolver {
     for (const raw of batch) {
       const ref: UnresolvedRef = {
         fromNodeId: raw.fromNodeId,
+        candidates: raw.candidates,
         referenceName: raw.referenceName,
         referenceKind: raw.referenceKind,
         line: raw.line,
@@ -1599,6 +1604,7 @@ export class ReferenceResolver {
     for (const raw of refs) {
       const ref: UnresolvedRef = {
         fromNodeId: raw.fromNodeId,
+        candidates: raw.candidates,
         referenceName: raw.referenceName,
         referenceKind: raw.referenceKind,
         line: raw.line,

@@ -3519,7 +3519,7 @@ export class QueryBuilder {
     const rows = this.db.prepare(`
       SELECT e.*, src.file_path AS source_file_path, src.language AS source_language
         FROM nodes src JOIN edges e ON e.source = src.id
-       WHERE src.language = ? AND e.kind IN ('calls', 'imports')
+       WHERE src.language = ? AND e.kind IN ('calls', 'imports', 'references')
          AND (e.provenance IS NULL OR e.provenance != 'heuristic')
     `).all(language) as Array<EdgeRow & { source_file_path: string; source_language: Language }>;
     return rows.map((row) => ({

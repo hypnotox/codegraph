@@ -1,34 +1,75 @@
 # Robot Framework support
 
-CodeGraph indexes `.robot` and `.resource` files with this vendored Tree-sitter
-grammar. Installing CodeGraph does not install or fetch another grammar package.
+CodeGraph indexes `.robot` and `.resource` files with a native data parser.
+The vendored Tree-sitter grammar remains available for source highlighting;
+it no longer limits graph extraction. No Robot installation or Python execution
+is required.
 
 ## Graph coverage
 
-- User keywords, tests/tasks, section variables, documentation and source ranges.
-- Ordinary keyword calls, including assignment, loop and conditional bodies.
-- Suite setup/teardown, keyword teardown, and per-file test/task setup, teardown
-  and templates, including per-test overrides and `NONE`.
-- Relative `Resource` imports, `${CURDIR}` and `${/}`, transitive resources,
-  resource-qualified calls, and case/space/underscore-insensitive keyword lookup.
-- English Given/When/Then/And/But prefixes, after trying the full keyword name.
+- Space/tab and pipe formats, continuations, comments, escaped literals, Unicode,
+  CRLF, and source-declared language aliases.
+- Keywords, tests/tasks, documentation, arguments, section variables, local `VAR`
+  bindings, assignments, loops and conditionals, with original source ranges.
+- Suite/keyword/test setup and teardown, templates, per-test `NONE` overrides,
+  and test defaults inherited from ancestor `__init__.robot` files.
+- Relative and transitive resources, static variables in paths and keyword names,
+  `${CURDIR}` relative to its declaring file, collection lookups and nested names.
+- Local/resource/library precedence, explicit namespaces and aliases, normalized
+  names, localized BDD prefixes, embedded arguments and compatible regular expressions.
+  Ambiguity remains unresolved; lookup never falls back to unrelated global symbols.
+- Static Python modules/classes, decorated names, automatic keyword exposure,
+  `@not_keyword`, `@library`, `ROBOT_AUTO_KEYWORDS`, `__all__`, imported base classes
+  and function reexports. Calls target the existing Python implementation nodes.
+- Literal Python and JSON variables and the YAML subset below. JSON files are
+  tracked as data files so their edits participate in incremental indexing.
+  References to JSON/YAML variables lead to their source document.
+- Checked-in Libdoc XML (`.libspec` or `.xml`) and JSON keyword specifications,
+  imported by path or by a unique matching library filename.
+- BuiltIn `Run Keyword`, `Run Keywords`, conditional/error-handling variants,
+  `Repeat Keyword` and `Wait Until Keyword Succeeds` connect to statically named
+  nested keywords, including alternative branches. A shadowing user/library
+  keyword does not acquire BuiltIn semantics.
 
-On Robot file changes, sync re-evaluates Robot reference bindings, including
-unchanged callers, without reparsing unchanged files.
+Sync rebinds Robot callers after Robot, Python, variable-document or Libdoc edits.
+Changing/removing an initialization file also reparses affected child suites:
+a changed template can turn argument rows into calls or vice versa. Other
+unchanged Robot files keep their extracted symbols.
 
-Tests and keywords share CodeGraph's existing `function` node kind but are tagged
-`robot:test` and `robot:keyword`. Only keywords are eligible call targets. Template
-rows are arguments, not keyword calls. Displayed names retain their original text.
+## Static-analysis boundaries
 
-This is static analysis, not the Robot runtime. Python/library keyword resolution,
-embedded-argument matching, dynamically constructed names/imports, keywords passed
-as arguments to `Run Keyword`-style dispatchers, and inherited `__init__.robot`
-suite settings are not resolved. Library and Variables imports are recorded but
-not linked to implementations. Lookup follows each source file's own resource
-imports; runtime caller-suite search paths are not inferred. Ambiguous and
-unsupported references remain unresolved rather than falling back to unrelated
-same-named symbols elsewhere in the project. Syntax coverage follows the vendored
-grammar; this is not a claim of complete Robot Framework version compatibility.
+This is not runtime emulation. Environment/command-line values, executed variable
+providers, computed Python expressions, library constructors and dynamic/hybrid
+keyword APIs are not evaluated. Installed libraries need local source or a
+checked-in Libdoc; no interpreter or installed-package search is performed.
+Python module search covers the importing directory, project root, and `src`
+layouts with `pyproject.toml` or `setup.py`. Runtime search-order changes and
+caller-suite-specific resource environments are not inferred.
+
+Arguments and keyword-call return values are unknown. Straight-line local `VAR`
+values may resolve; branch-dependent assignments do not become asserted constants.
+The graph follows every statically identified conditional target without claiming
+which branch executes.
+
+The native YAML reader supports literal block mappings/sequences, scalar values,
+and JSON-form flow values. Anchors, aliases, tags, block scalars, timestamps and
+non-JSON flow syntax still require a complete YAML parser and remain unresolved.
+Use JSON variable files when that full static-data coverage is needed on this
+branch. Python-specific embedded-regexp extensions not supported by JavaScript
+also remain unresolved. These are remaining static coverage limits, not runtime
+features.
+
+## Local validation
+
+```sh
+npm ci
+npm run build
+npx vitest run __tests__/robot-framework.test.ts
+node dist/bin/codegraph.js index --help
+```
+
+Use a fresh index (or force a rebuild) when testing an existing project; the
+extraction version changed. Normal builds need no grammar compiler.
 
 ## Provenance and local changes
 

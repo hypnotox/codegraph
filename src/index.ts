@@ -41,6 +41,7 @@ import {
   SyncResult,
   extractFromSource,
   initGrammars,
+  loadGrammarsForLanguages,
 } from './extraction';
 import {
   ReferenceResolver,
@@ -578,6 +579,7 @@ export class CodeGraph {
           this.resolver.initialize();
           // Cross-file finalization (e.g. NestJS RouterModule prefixes). Runs
           // before resolution so updated names show up in subsequent reads.
+          if (this.queries.getAllFiles().some(f => f.language === 'robot')) await loadGrammarsForLanguages(['python']);
           this.resolver.runPostExtract();
           if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[phase-timing] resolver-reinit: ${Date.now() - tReinit}ms`);
         }
@@ -829,6 +831,8 @@ export class CodeGraph {
         // indexAll's fold between store and resolution.
         if (walValve) await walValve.foldNow();
 
+        if (this.queries.getAllFiles().some(f => f.language === 'robot')) await loadGrammarsForLanguages(['python']);
+
         // Cross-file finalization (e.g. NestJS RouterModule prefixes). Run on
         // every sync that touched files so edits to `app.module.ts` propagate
         // to controllers in unchanged files. The pass is idempotent and cheap
@@ -954,9 +958,9 @@ export class CodeGraph {
 
         // Robot binds normalized names through transitive Resource imports.
         // Raw name deltas cannot detect either a newly satisfiable normalized
-        // call or a changed import scope. Reopen Robot bindings on Robot edits;
+        // call or a changed import scope. Reopen bindings when any static input changes;
         // extraction remains incremental and other languages are unaffected.
-        if (result.changedLanguages?.includes('robot')) {
+        if (result.changedLanguages?.some(language => ['robot', 'python', 'yaml', 'json', 'xml'].includes(language))) {
           this.orchestrator.resurrectLanguageResolutionEdges('robot', result.changedFilePaths ?? []);
         }
 

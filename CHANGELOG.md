@@ -25,7 +25,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### New Features
 
-- **Robot Framework projects can now be indexed.** Explore keywords, tests, calls and resource dependencies in `.robot` and `.resource` files, including setup, teardown and templates.
+- Robot Framework analysis connects tests and resource keywords to static Python libraries and Libdoc, follows static variables and nested keyword calls, and refreshes inherited test defaults when initialization files change.
 
 - **Codex and Astra read project guidance from `AGENTS.md`.** The canonical agent guide now lives in `AGENTS.md` (with a nested `docs/AGENTS.md` for long validation notes); `CLAUDE.md` is a thin `@AGENTS.md` wrapper for Claude Code. Codex/Astra no longer miss the old CLAUDE-only instructions.
 

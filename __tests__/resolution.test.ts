@@ -947,7 +947,7 @@ function processDate(input: string): string {
 
       // Get stats to verify indexing worked
       const stats = cg.getStats();
-      expect(stats.fileCount).toBe(2);
+      expect(stats.fileCount).toBe(3); // Two source files plus the tracked JSON manifest.
       expect(stats.nodeCount).toBeGreaterThan(0);
     });
 

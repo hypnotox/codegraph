@@ -11,7 +11,7 @@ import * as fsp from 'fs/promises';
 import { Parser, Language as WasmLanguage } from 'web-tree-sitter';
 import { Language } from '../types';
 
-export type GrammarLanguage = Exclude<Language, 'svelte' | 'vue' | 'astro' | 'liquid' | 'razor' | 'yaml' | 'twig' | 'xml' | 'properties' | 'unknown'>;
+export type GrammarLanguage = Exclude<Language, 'svelte' | 'vue' | 'astro' | 'liquid' | 'razor' | 'yaml' | 'twig' | 'xml' | 'properties' | 'unknown' | 'json'>;
 
 /**
  * WASM filename map — maps each language to its .wasm grammar file
@@ -97,6 +97,8 @@ export const EXTENSION_MAP: Record<string, Language> = {
   '.theme': 'php',
   '.inc': 'php',
   // YAML (used for Drupal routing files; no symbol extraction, file-level tracking only)
+  '.json': 'json', // Static variable documents and JSON Libdoc; no grammar required.
+  '.libspec': 'xml',
   '.yml': 'yaml',
   '.yaml': 'yaml',
   // Twig templates (file-level tracking only, no symbol extraction)
@@ -587,6 +589,7 @@ export function isLanguageSupported(language: Language): boolean {
   if (language === 'astro') return true; // custom extractor (frontmatter/script block delegation)
   if (language === 'liquid') return true; // custom regex extractor
   if (language === 'razor') return true; // custom RazorExtractor (.cshtml/.razor markup)
+  if (language === 'json') return true; // Static variable and Libdoc documents.
   if (language === 'yaml') return true; // file-level tracking only; Drupal routing extraction via framework resolver
   if (language === 'twig') return true; // file-level tracking only
   if (language === 'xml') return true; // MyBatis mapper extractor
@@ -600,7 +603,7 @@ export function isLanguageSupported(language: Language): boolean {
  */
 export function isGrammarLoaded(language: Language): boolean {
   if (language === 'svelte' || language === 'vue' || language === 'astro' || language === 'liquid' || language === 'razor') return true;
-  if (language === 'yaml' || language === 'twig') return true; // no WASM grammar needed
+  if (language === 'json' || language === 'yaml' || language === 'twig') return true; // no WASM grammar needed
   if (language === 'xml' || language === 'properties') return true; // no WASM grammar needed
   return languageCache.has(language);
 }
@@ -615,7 +618,7 @@ export function isGrammarLoaded(language: Language): boolean {
  * indexed rather than skipped, so it must stay in sync with that branch.
  */
 export function isFileLevelOnlyLanguage(language: Language): boolean {
-  return language === 'yaml' || language === 'twig' || language === 'properties';
+  return language === 'json' || language === 'yaml' || language === 'twig' || language === 'properties';
 }
 
 /**
@@ -700,6 +703,7 @@ export function getLanguageDisplayName(language: Language): string {
     nix: 'Nix',
     robot: 'Robot Framework',
     yaml: 'YAML',
+    json: 'JSON',
     twig: 'Twig',
     xml: 'XML',
     properties: 'Java properties',

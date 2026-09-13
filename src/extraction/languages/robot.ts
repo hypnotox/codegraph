@@ -1,158 +1,86 @@
-/** Robot Framework symbols and references, extracted from the vendored grammar. */
-import type { Node as SyntaxNode } from 'web-tree-sitter';
-import type { ExtractorContext, LanguageExtractor } from '../tree-sitter-types';
+/** Persisted Robot semantics shared by extraction and static resolution. */
+import type { Node } from '../../types';
 
-// Persist the distinction using existing node metadata: tests are not keywords,
-// and Library/Variables imports must not be resolved as Resource imports.
 export const ROBOT_KEYWORD = 'robot:keyword';
 export const ROBOT_TEST = 'robot:test';
 export const ROBOT_RESOURCE = 'robot:resource';
+const DATA = 'robot:data:';
+
+export type RobotDefaults = Record<string, string[]>;
+
+export interface RobotData {
+  args?: string[];
+  defaults?: RobotDefaults;
+  prefixes?: string[];
+  value?: unknown;
+  owner?: string;
+  binding?: 'argument' | 'assignment' | 'variable';
+  conditional?: boolean;
+}
+
+export function robotData(node: Node | undefined): RobotData {
+  const data = node?.decorators?.find(d => d.startsWith(DATA));
+  return data ? JSON.parse(data.slice(DATA.length)) as RobotData : {};
+}
+
+export function robotDecorators(data: RobotData, ...tags: string[]): string[] {
+  return [...tags, DATA + JSON.stringify(data)];
+}
 
 export function normalizeRobotName(name: string): string {
-  return name.toLowerCase().replace(/[\s_]/gu, '');
+  return name.toLowerCase().replace(/[\s_\u001c-\u001f\u0085]/gu, '');
 }
 
-function child(node: SyntaxNode, type: string): SyntaxNode | undefined {
-  return node.namedChildren.find((n) => n.type === type);
-}
+export interface RobotCell { text: string; line: number; column: number }
+export interface RobotRow { cells: RobotCell[]; line: number; endLine: number; indented: boolean }
 
-/** Arguments can continue on subsequent lines; keep their order, not their children. */
-function argumentsOf(node: SyntaxNode): SyntaxNode[] {
-  const args = child(node, 'arguments');
-  if (!args) return [];
-  return args.namedChildren.flatMap((n) => n.type === 'argument' ? [n]
-    : n.type === 'continuation' ? n.namedChildren.filter((c) => c.type === 'argument') : []);
-}
-
-function settingName(node: SyntaxNode): string {
-  return normalizeRobotName(node.childForFieldName('name')?.text ?? '');
-}
-
-function isSetting(node: SyntaxNode): boolean {
-  return node.type === 'keyword_setting' || node.type === 'test_case_setting';
-}
-
-function enabledKeyword(argument: SyntaxNode | undefined): string | undefined {
-  const name = argument?.text.trim();
-  return name && name.toUpperCase() !== 'NONE' ? name : undefined;
-}
-
-function extractRobot(root: SyntaxNode, ctx: ExtractorContext): void {
-  const fileId = ctx.nodeStack[ctx.nodeStack.length - 1];
-  if (!fileId) return;
-  const settings = root.namedChildren
-    .flatMap((section) => section.namedChildren)
-    .filter((section) => section.type === 'settings_section')
-    .flatMap((section) => section.namedChildren)
-    .filter((n) => n.type === 'setting_statement');
-  const defaults = new Map(settings.map((n) => [settingName(n), n]));
-
-  function reference(name: string | undefined, at: SyntaxNode, kind: 'calls' | 'imports'): void {
-    if (!name) return;
-    ctx.addUnresolvedReference({
-      fromNodeId: ctx.nodeStack[ctx.nodeStack.length - 1]!,
-      referenceName: name,
-      referenceKind: kind,
-      line: at.startPosition.row + 1,
-      column: at.startPosition.column,
-      filePath: ctx.filePath,
-      language: 'robot',
-    });
-  }
-
-  function visitDefinition(node: SyntaxNode): void {
-    const name = child(node, 'name')?.text.trim();
-    if (!name) return;
-    const isTest = node.type === 'test_case_definition';
-    const body = child(node, 'body');
-    const ownSettings = (body?.namedChildren ?? []).filter(isSetting);
-    // The grammar also allows a keyword setting on the definition's first line.
-    ownSettings.push(...node.namedChildren.filter(isSetting));
-    const own = new Map(ownSettings.map((n) => [settingName(n), n]));
-    const documentation = own.get('documentation');
-    const args = own.get('arguments');
-    const symbol = ctx.createNode('function', name, node, {
-      decorators: [isTest ? ROBOT_TEST : ROBOT_KEYWORD],
-      isExported: !isTest,
-      signature: args ? `${name}    ${argumentsOf(args).map((n) => n.text).join('    ')}` : name,
-      docstring: documentation ? argumentsOf(documentation).map((n) => n.text).join(' ') : undefined,
-    });
-    if (!symbol) return;
-    ctx.pushScope(symbol.id);
-
-    // A test-level NONE setting overrides, rather than inherits, its default.
-    function testSetting(name: string): SyntaxNode | undefined {
-      return own.get(name) ?? defaults.get(`test${name}`) ?? defaults.get(`task${name}`);
+/** Robot's data syntax: tab/two-space separated or pipe separated cells. */
+export function robotRows(source: string): RobotRow[] {
+  const rows: RobotRow[] = [];
+  for (const [index, raw] of source.split(/\r\n|\n|\r/).entries()) {
+    const line = index + 1;
+    const pipe = /^\s*\|(?:\s|$)/u.test(raw);
+    const cells: RobotCell[] = [];
+    let start = 0;
+    if (pipe) {
+      const bars = [...raw.matchAll(/\|(?=\s|$)/gu)].filter(m => m.index === 0 || /\s/u.test(raw[m.index! - 1]!));
+      start = bars.shift()!.index! + 1;
+      for (const bar of bars) {
+        const text = raw.slice(start, bar.index);
+        cells.push({ text: text.trim(), line, column: start + text.length - text.trimStart().length });
+        start = bar.index! + 1;
+      }
+      if (raw.slice(start).trim()) {
+        const text = raw.slice(start); cells.push({ text: text.trim(), line, column: start + text.length - text.trimStart().length });
+      }
+    } else {
+      const delimiter = /(?:(?:[^\S\r\n]|\u0085|[\u001c-\u001f])*\t(?:[^\S\r\n]|\u0085|[\u001c-\u001f])*|(?:[^\S\r\n\t]|\u0085|[\u001c-\u001f]){2,})/gu;
+      for (const match of raw.matchAll(delimiter)) {
+        cells.push({ text: raw.slice(start, match.index).trim(), line, column: start });
+        start = match.index! + match[0].length;
+      }
+      cells.push({ text: raw.slice(start).trimEnd(), line, column: start });
     }
-    for (const name of isTest ? ['setup', 'teardown'] : ['teardown']) {
-      const setting = isTest ? testSetting(name) : own.get(name);
-      if (setting) reference(enabledKeyword(argumentsOf(setting)[0]), setting, 'calls');
-    }
-    const templateSetting = isTest ? testSetting('template') : undefined;
-    const template = templateSetting ? enabledKeyword(argumentsOf(templateSetting)[0]) : undefined;
-    if (template) reference(template, node, 'calls');
-    // In a templated test these rows contain argument values, NOT keyword names.
-    if (body && !template) visit(body);
-    ctx.popScope();
+    const indented = cells[0]?.text === '';
+    while (cells[0]?.text === '') cells.shift();
+    const comment = cells.findIndex(c => c.text.startsWith('#'));
+    if (comment >= 0) cells.splice(comment);
+    if (!cells.length) continue;
+    if (cells[0]!.text === '...') {
+      const previous = rows[rows.length - 1];
+      if (previous) { previous.cells.push(...cells.slice(1)); previous.endLine = line; }
+    } else rows.push({ cells, line, endLine: line, indented });
   }
-
-  function visit(node: SyntaxNode): void {
-    switch (node.type) {
-      case 'keyword_definition':
-      case 'test_case_definition':
-        visitDefinition(node);
-        return;
-      case 'setting_statement': {
-        const name = settingName(node);
-        const target = argumentsOf(node)[0];
-        if (target && ['resource', 'library', 'variables'].includes(name)) {
-          ctx.createNode('import', target.text.trim(), node, {
-            signature: node.text.trim(),
-            decorators: [name === 'resource' ? ROBOT_RESOURCE : `robot:${name}`],
-          });
-          reference(target.text.trim(), node, 'imports');
-        } else if (name === 'suitesetup' || name === 'suiteteardown') {
-          reference(enabledKeyword(target), node, 'calls');
-        }
-        return;
-      }
-      case 'keyword_invocation': {
-        const keyword = child(node, 'keyword');
-        if (keyword) reference(keyword.text.trim(), keyword, 'calls');
-        return;
-      }
-      case 'variable_assignment': {
-        // Hubro's grammar represents `${x}=    Keyword    arg` as arguments;
-        // its first argument is the invoked keyword, not a variable value.
-        const keyword = argumentsOf(node)[0];
-        if (keyword) reference(keyword.text.trim(), keyword, 'calls');
-        return;
-      }
-      case 'variable_definition': {
-        const variable = node.namedChildren.find((n) =>
-          ['scalar_variable', 'list_variable', 'dictionary_variable'].includes(n.type));
-        if (variable) ctx.createNode('variable', variable.text, node, { signature: node.text.trim() });
-        return;
-      }
-      case 'keyword_setting':
-      case 'test_case_setting':
-      case 'comment':
-        return;
-    }
-    for (const item of node.namedChildren) visit(item);
-  }
-
-  visit(root);
+  return rows;
 }
 
-export const robotExtractor: LanguageExtractor = {
-  functionTypes: [], classTypes: [], methodTypes: [], interfaceTypes: [],
-  structTypes: [], enumTypes: [], typeAliasTypes: [], importTypes: [],
-  callTypes: [], variableTypes: [],
-  nameField: 'name', bodyField: 'body', paramsField: 'arguments',
-  visitNode(node, ctx) {
-    if (node.type !== 'source_file') return false;
-    extractRobot(node, ctx);
-    return true;
-  },
-};
+/** Unescape Robot literals, preserving escaped variable openers for substitution. */
+export function unescapeRobot(value: string): string {
+  return value.replace(/\\(x[\da-fA-F]{2}|u[\da-fA-F]{4}|U[\da-fA-F]{8}|.)/gu, (_, c: string) => {
+    if (/^[xuU]/.test(c) && c.length > 1) {
+      const code = parseInt(c.slice(1), 16);
+      return code <= 0x10ffff ? String.fromCodePoint(code) : '';
+    }
+    return ({ n: '\n', r: '\r', t: '\t' } as Record<string, string>)[c] ?? c;
+  });
+}
